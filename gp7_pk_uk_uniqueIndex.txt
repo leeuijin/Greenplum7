@@ -1,0 +1,91 @@
+Greenplum 7에서 압축 테이블 Unique 지원
+
+- Greenplum 7에서는 압축 테이블에 PK, UK, UNIQUE INDEX 지원
+- Greenplum 6이하 버전에서는 압축 테이블에 PK, UK, UNIQUE INDEX 미지원
+
+* 유니크 보장을 위한 분산키
+Primary Key, Unique Key, Unique Index를 만들기 위해서는 분산키가 반드시 포함되어 있어야 함.
+Priamry Key (A,B,C,D...) 일때 분산키는 (A), (A,B), (A,B,C), (A,B,C,D)로 생성해야 함.
+
+1. 일반 압축 테이블 
+DROP TABLE IF EXISTS public.customer;
+CREATE TABLE public.customer
+(
+    cust_no int, 
+    cust_nm TEXT, 
+    CONSTRAINT customer_pk PRIMARY key(cust_no)
+)
+WITH (appendonly=TRUE, compresstype=zstd, compresslevel=7)
+DISTRIBUTED BY (cust_no)
+;
+
+2.파티션 압축 테이블 
+DROP TABLE IF EXISTS public.order_log;
+CREATE TABLE public.order_log
+(
+    order_no      int, 
+    cust_no       int,
+    prod_nm       TEXT,
+    order_date    date
+)
+WITH (appendonly=TRUE, compresstype=zstd, compresslevel=7)
+DISTRIBUTED BY (order_no)
+PARTITION BY RANGE (order_date)
+(
+   PARTITION p2001 start('2001-01-01'::date) END ('2002-01-01'::date), 
+   PARTITION p2002 start('2002-01-01'::date) END ('2003-01-01'::date), 
+   PARTITION p2003 start('2003-01-01'::date) END ('2004-01-01'::date), 
+   PARTITION p2004 start('2004-01-01'::date) END ('2005-01-01'::date), 
+   PARTITION p2005 start('2005-01-01'::date) END ('2006-01-01'::date), 
+   PARTITION p2006 start('2006-01-01'::date) END ('2007-01-01'::date), 
+   PARTITION p2007 start('2007-01-01'::date) END ('2008-01-01'::date), 
+   PARTITION p2008 start('2008-01-01'::date) END ('2009-01-01'::date), 
+   PARTITION p2009 start('2009-01-01'::date) END ('2010-01-01'::date),
+   PARTITION p2010 start('2010-01-01'::date) END ('2011-01-01'::date)
+)
+;
+
+--파티션 테이블에 Unique Index를 만들기 위해서 분산키, 파티션키가 포함이 되어 있어야 함.
+CREATE UNIQUE INDEX ixu_order_log ON public.order_log (order_no, order_date);
+
+--압축 테이블임에도 불구하고 PK, UK, Unique Index를 생성할 수 있음.
+INSERT INTO public.customer 
+SELECT i, 'cust_nm_'||trim(to_char(i, '000')) 
+FROM   generate_series(1, 100) i 
+;
+
+--압축 테이블에 데이터 듀플리케이션 발생시 에러 발생 
+INSERT INTO public.customer
+VALUES (1, 'customer01');
+
+SQL Error [23505]: ERROR: duplicate key value violates unique constraint "customer_pk"  (seg4 172.16.65.133:6000 pid=294547)
+  Detail: Key (cust_no)=(1) already exists.
+  
+SELECT count(*) FROM public.customer ;
+--100
+
+
+--이력 파티션 압축 테이블에 초기 적
+INSERT INTO public.order_log 
+SELECT i order_no
+     , i%100 cust_no
+     , 'prod_'||trim(to_char(i%50, '00000')) prod_nm  
+     , '2001-01-01'::date + i order_date
+FROM   generate_series(1, 3650) i 
+;
+
+SELECT count(*) FROM public.order_log ;
+--3,650 rows
+
+--압축 테이블에 데이터 듀플리케이션 발생시 에러 발생 
+INSERT INTO public.order_log 
+SELECT 1 order_no
+     , 1 cust_no
+     , 'prod_0001' prod_nm  
+     , '2001-01-01'::date + 1 ;
+SQL Error [23505]: ERROR: duplicate key value violates unique constraint "order_log_1_prt_p2001_order_no_order_date_idx"  (seg4 172.16.65.133:6000 pid=294547)
+  Detail: Key (order_no, order_date)=(1, 2001-01-02) already exists.
+
+SELECT count(*) FROM public.order_log ;
+--3,650 rows
+

@@ -1,0 +1,192 @@
+Greenplum 7 워크로드 매니져
+
+1. Greenplum 7에서는 워크로드매니저를 3가지 형태로 제공
+   1) Greenplum Resource Queue 
+      - Default 이며, Greenplum 3버전 이후에 제공하는 기본 워크로드 매니저
+      - ACTIVE_STATEMENTS, MEMORY_LIMIT, MAX_COST, CPU PRIORITY로 관리
+   2) Greenplum Resource Group cgroup v1
+      - Greenplum 5 이후 지원되며, 리눅스의 cgroup v1 기반으로 워크로드 관리 
+      - CONCURRENCY, CPU_MAX_PERCENT, CPU_WEIGHT, CPUSET, MEMORY_LIMIT, MIN_COST로 관리
+   3) Greenplum Resource Group cgroup v2:  
+      - Greenplum 7 이후 지원되며, 리눅스의 cgroup v2 기반으로 워크로드 관리
+      - CONCURRENCY, CPU_MAX_PERCENT, CPU_WEIGHT, CPUSET, MEMORY_LIMIT, MIN_COST + IO_LIMIT로 관리
+      - Disk IO 컨트롤 까지 지원 (Disk Read/Write의 bps/iops) 
+
+2. Greenplum 7의 Resource Group v2 설정 방법
+  1) 메뉴얼
+     - https://docs.vmware.com/en/VMware-Greenplum/7/greenplum-database/admin_guide-workload_mgmt_resgroups.html
+  2) OS cgroup v2 설정 (모든 노드, root 계정)
+     # all 
+=> grubby --update-kernel=ALL --args="systemd.unified_cgroup_hierarchy=1"
+[ cdw.gpdbkr.com]
+[scdw.gpdbkr.com]
+[sdw1.gpdbkr.com]
+[sdw2.gpdbkr.com]
+[sdw3.gpdbkr.com]
+[sdw4.gpdbkr.com]
+=> sync;sync;
+=> reboot now
+
+    # all
+[root@cdw ~]# all
+=> grubby --info=DEFAULT | grep args
+[ cdw.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+[scdw.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+[sdw1.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+[sdw2.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+[sdw3.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+[sdw4.gpdbkr.com] args="ro crashkernel=auto resume=/dev/mapper/rl-swap rd.lvm.lv=rl/root rd.lvm.lv=rl/swap elevator=deadline transparent_hugepage=never $tuned_params systemd.unified_cgroup_hierarchy=1"
+=> stat -fc %T /sys/fs/cgroup/
+[ cdw.gpdbkr.com] cgroup2fs
+[scdw.gpdbkr.com] cgroup2fs
+[sdw1.gpdbkr.com] cgroup2fs
+[sdw2.gpdbkr.com] cgroup2fs
+[sdw3.gpdbkr.com] cgroup2fs
+[sdw4.gpdbkr.com] cgroup2fs
+=> mkdir -p /sys/fs/cgroup/gpdb.service
+=> echo "+cpuset +io +cpu +memory" | tee -a /sys/fs/cgroup/cgroup.subtree_control
+[scdw.gpdbkr.com] +cpuset +io +cpu +memory
+[sdw4.gpdbkr.com] +cpuset +io +cpu +memory
+[sdw2.gpdbkr.com] +cpuset +io +cpu +memory
+[sdw3.gpdbkr.com] +cpuset +io +cpu +memory
+[ cdw.gpdbkr.com] +cpuset +io +cpu +memory
+[sdw1.gpdbkr.com] +cpuset +io +cpu +memory
+=> chown -R gpadmin:gpadmin /sys/fs/cgroup/gpdb.service
+=> chmod a+w /sys/fs/cgroup/cgroup.procs
+=> cat /sys/fs/cgroup/cgroup.subtree_control
+[scdw.gpdbkr.com] cpuset cpu io memory pids
+[sdw4.gpdbkr.com] cpuset cpu io memory pids
+[sdw2.gpdbkr.com] cpuset cpu io memory pids
+[sdw3.gpdbkr.com] cpuset cpu io memory pids
+[ cdw.gpdbkr.com] cpuset cpu io memory pids
+[sdw1.gpdbkr.com] cpuset cpu io memory pids
+=> exit
+
+########### 메뉴얼에 나온 부분을 일부 수정
+########### 시스템 리부팅하고 난뒤에 gpstart가 되지 않을 경우 아래와 같이 수정
+########### 변경 사항
+WorkingDirectory=/sys/fs/cgroup/gpdb.service => WorkingDirectory=/sys/fs/cgroup
+chown -R gpadmin:gpadmin .; \   => chown -R gpadmin:gpadmin ./gpdb.service; \
+chmod a+w ../cgroup.procs; \     => chmod a+w ./cgroup.procs; \
+
+########### gpdb.service 소스
+[root@cdw ~]# vi /etc/systemd/system/gpdb.service
+[root@cdw ~]# cat /etc/systemd/system/gpdb.service
+[Unit]
+Description=Greenplum Cgroup v2 Configuration Service
+[Service]
+Type=simple
+WorkingDirectory=/sys/fs/cgroup
+Delegate=yes
+Slice=-.slice
+
+# set hierarchies only if cgroup v2 mounted
+ExecCondition=bash -c '[ xcgroup2fs = x$(stat -fc "%%T" /sys/fs/cgroup) ] || exit 1'
+ExecStartPre=bash -ec " \
+chown -R gpadmin:gpadmin ./gpdb.service; \
+chmod a+w ./cgroup.procs; \
+mkdir -p helper.scope"
+ExecStart=sleep infinity
+ExecStartPost=bash -ec "echo $MAINPID > ./helper.scope/cgroup.procs; "
+[Install]
+WantedBy=basic.target
+
+########### 모든 노드에 gpdb.service 복사
+[root@cdw ~]#
+[root@cdw ~]# scp /etc/systemd/system/gpdb.service smdw:/etc/systemd/system/gpdb.service
+[root@cdw ~]# scp /etc/systemd/system/gpdb.service sdw1:/etc/systemd/system/gpdb.service
+[root@cdw ~]# scp /etc/systemd/system/gpdb.service sdw2:/etc/systemd/system/gpdb.service
+[root@cdw ~]# scp /etc/systemd/system/gpdb.service sdw3:/etc/systemd/system/gpdb.service
+[root@cdw ~]# scp /etc/systemd/system/gpdb.service sdw4:/etc/systemd/system/gpdb.service
+[root@cdw ~]#
+
+########### 모든 노드에 gpdb.service 활성화
+[root@cdw ~]# all
+=> systemctl daemon-reload
+=> systemctl enable gpdb.service
+=> systemctl status gpdb.service
+=> sync;sync;
+
+########### 모든 노드 Reboot
+########### 리부팅 후 cgroup v2 활성화 확인
+[root@cdw ~]# all
+=> ls /sys/fs/cgroup/gpdb.service
+[ cdw.gpdbkr.com] cgroup.controllers	cpuset.mems	       memory.max
+[ cdw.gpdbkr.com] cgroup.events		cpuset.mems.effective  memory.min
+[ cdw.gpdbkr.com] cgroup.freeze		cpu.stat	       memory.numa_stat
+[ cdw.gpdbkr.com] cgroup.max.depth	cpu.weight	       memory.oom.group
+[ cdw.gpdbkr.com] cgroup.max.descendants	cpu.weight.nice        memory.pressure
+[ cdw.gpdbkr.com] cgroup.procs		io.bfq.weight	       memory.stat
+[ cdw.gpdbkr.com] cgroup.stat		io.latency	       memory.swap.current
+[ cdw.gpdbkr.com] cgroup.subtree_control	io.max		       memory.swap.events
+[ cdw.gpdbkr.com] cgroup.threads		io.pressure	       memory.swap.high
+[ cdw.gpdbkr.com] cgroup.type		io.stat		       memory.swap.max
+[ cdw.gpdbkr.com] cpu.max			memory.current	       pids.current
+[ cdw.gpdbkr.com] cpu.pressure		memory.events	       pids.events
+[ cdw.gpdbkr.com] cpuset.cpus		memory.events.local    pids.max
+[ cdw.gpdbkr.com] cpuset.cpus.effective	memory.high
+[ cdw.gpdbkr.com] cpuset.cpus.partition	memory.low
+...
+[sdw4.gpdbkr.com] cgroup.controllers	cpuset.mems	       memory.max
+[sdw4.gpdbkr.com] cgroup.events		cpuset.mems.effective  memory.min
+[sdw4.gpdbkr.com] cgroup.freeze		cpu.stat	       memory.numa_stat
+[sdw4.gpdbkr.com] cgroup.max.depth	cpu.weight	       memory.oom.group
+[sdw4.gpdbkr.com] cgroup.max.descendants	cpu.weight.nice        memory.pressure
+[sdw4.gpdbkr.com] cgroup.procs		io.bfq.weight	       memory.stat
+[sdw4.gpdbkr.com] cgroup.stat		io.latency	       memory.swap.current
+[sdw4.gpdbkr.com] cgroup.subtree_control	io.max		       memory.swap.events
+[sdw4.gpdbkr.com] cgroup.threads		io.pressure	       memory.swap.high
+[sdw4.gpdbkr.com] cgroup.type		io.stat		       memory.swap.max
+[sdw4.gpdbkr.com] cpu.max			memory.current	       pids.current
+[sdw4.gpdbkr.com] cpu.pressure		memory.events	       pids.events
+[sdw4.gpdbkr.com] cpuset.cpus		memory.events.local    pids.max
+[sdw4.gpdbkr.com] cpuset.cpus.effective	memory.high
+[sdw4.gpdbkr.com] cpuset.cpus.partition	memory.low
+=> ls /sys/fs/cgroup/gpdb | wc -l
+[sdw2.gpdbkr.com] 43
+[scdw.gpdbkr.com] 43
+[sdw3.gpdbkr.com] 43
+[sdw1.gpdbkr.com] 43
+[sdw4.gpdbkr.com] 43
+[ cdw.gpdbkr.com] 43
+=>
+
+
+########### Greenplum cgroup v2 설정
+[gpadmin@cdw ~]$ gpconfig -c gp_resource_manager -v "group-v2"
+20240709:10:05:25:015578 gpconfig:cdw:gpadmin-[INFO]:-completed successfully with parameters '-c gp_resource_manager -v group-v2'
+[gpadmin@cdw ~]$ gpstop -af
+[gpadmin@cdw ~]$ gpstart -a
+
+3. Disk IO 성능 제약 설정 테스트 결과
+  1) VM에서 Disk IO를 제약하지 않았을 경우
+gpadmin=# ALTER RESOURCE GROUP rgoltp  SET IO_LIMIT 'pg_default:wbps=2000,wiops=2000,rbps=2000,riops=2000';
+[gpadmin@cdw gpkrtpch]$ ./2.2_upload.sh
+./2.2_upload.sh: START TIME :  2024-03-28 21:42:52
+./2.2_upload.sh: End TIME : 2024-03-28 21:43:31
+./2.2_upload.sh|2024-03-28 21:42:52|2024-03-28 21:43:31|39 <<<==============
+[gpadmin@cdw gpkrtpch]$
+        ----system---- ----total-usage---- -dsk/total- -net/total- ------memory-usage-----
+          date/time   |usr sys idl wai stl| read  writ| recv  send| used  buff  cach  free
+[sdw1]  28-03 21:43:11| 50  33   5   0   0|  27M   22M|  12M 5463k| 886M   34M 4096B 1335M
+[sdw2]  28-03 19:59:25| 49  31   5   2   0|  26M   10M|  12M 5786k| 883M   26M 4096B 1356M
+[sdw3]  28-03 19:59:24| 50  36   1   3   0|  41M   17M|  11M 5172k| 882M   35M   76k 1337M
+[sdw4]  28-03 21:43:11| 52  29   5   0   0|  41M   22M|  11M 5267k| 889M   29M 4096B 1342M
+
+
+  2) VM에서 Disk IO를 제약할 경우
+gpadmin=# ALTER RESOURCE GROUP rgoltp  SET IO_LIMIT 'pg_default:wbps=2,wiops=2,rbps=2,riops=2';
+[gpadmin@cdw gpkrtpch]$ ./2.2_upload.sh
+./2.2_upload.sh: START TIME :  2024-03-28 21:36:24
+./2.2_upload.sh: End TIME : 2024-03-28 21:42:05
+./2.2_upload.sh|2024-03-28 21:36:24|2024-03-28 21:42:05|341  <<<==============
+
+        ---------------------------------- Segment Node ----------------------------------
+        ----system---- ----total-usage---- -dsk/total- -net/total- ------memory-usage-----
+          date/time   |usr sys idl wai stl| read  writ| recv  send| used  buff  cach  free
+[sdw1]  28-03 21:41:30|  7   5  69  16   0|4699k 3514k|1767k  769k| 899M   24M 4096B 1308M
+[sdw2]  28-03 19:57:44|  7   3   0  87   0|3197k 2810k|1587k  736k| 896M   19M 4096B 1317M
+[sdw3]  28-03 19:57:44|  6   5  77   9   0|2717k 1565k|1712k  811k| 896M   28M  244k 1308M
+[sdw4]  28-03 21:41:30|  9   5  68  15   0|1440k 2784k|2038k  984k| 901M   30M 4096B 1301M
+
+
