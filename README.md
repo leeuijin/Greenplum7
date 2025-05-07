@@ -11,6 +11,7 @@
 - Index only scan : heap 테이블에 인덱스 온리 스캔 지원, Covering index 지원
 - BRIN/Hash 인덱스 지원 
 - 워크로드 관리 : Resource Group v2 지원, Disk IO 컨트롤
+- pg_hint_plan: 쿼리 힌트 플랜 지원(테이블 스캔, Row Estimation, Join 순서 및 유형)
 
 ## 개발 생산성 
 - 프로시저 트랜잭션 지원: 프로시저 지원, 프로시저 내에 Commit 지원
